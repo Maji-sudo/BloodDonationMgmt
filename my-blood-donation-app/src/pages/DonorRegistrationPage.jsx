@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, MapPin, CheckSquare, Save } from 'lucide-react';
+import { AlertTriangle, MapPin, CheckSquare, Save, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { donorApi } from '../services/api';
 
 export default function DonorRegistrationPage() {
   const navigate = useNavigate();
@@ -16,41 +17,85 @@ export default function DonorRegistrationPage() {
   });
 
   const [showWarning, setShowWarning] = useState(false);
+  const [status, setStatus] = useState('idle'); // 'idle' | 'loading' | 'success' | 'error'
+  const [apiError, setApiError] = useState('');
 
   useEffect(() => {
     const ageNum = parseInt(formData.age, 10);
     const weightNum = parseInt(formData.weight, 10);
-
-    if ((ageNum && ageNum < 18) || (weightNum && weightNum < 50)) {
-      setShowWarning(true);
-    } else {
-      setShowWarning(false);
-    }
+    setShowWarning((ageNum && ageNum < 18) || (weightNum && weightNum < 50));
   }, [formData.age, formData.weight]);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     setFormData(prev => ({
       ...prev,
-      [name]: type === 'checkbox' ? checked : value
+      [name]: type === 'checkbox' ? checked : value,
     }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setApiError('');
+
     if (!formData.termsAccepted) {
-      alert("Please accept the Terms & Conditions.");
+      setApiError('Please accept the Terms & Conditions.');
       return;
     }
 
-    // Update local storage to mock profile update
-    const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
-    const updatedUser = { ...currentUser, ...formData, role: 'donor' };
-    localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+    setStatus('loading');
 
-    alert("Donor Profile successfully updated!");
-    navigate('/role'); // or somewhere else
+    try {
+      // Map frontend field names → backend field names
+      const payload = {
+        name: formData.name,
+        email: formData.email,
+        phone: formData.phone,
+        blood_type: formData.bloodGroup,
+        age: parseInt(formData.age, 10),
+        weight: parseFloat(formData.weight),
+        is_available: true,
+      };
+
+      const result = await donorApi.register(payload);
+
+      // Save donor info locally for session context
+      const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
+      localStorage.setItem('currentUser', JSON.stringify({
+        ...currentUser,
+        ...formData,
+        role: 'donor',
+        donorId: result.donor.id,
+      }));
+
+      setStatus('success');
+
+      // Auto-redirect after 2 seconds
+      setTimeout(() => navigate('/role'), 2000);
+
+    } catch (err) {
+      setStatus('error');
+      setApiError(err.message);
+    }
   };
+
+  // ── Success Screen ────────────────────────────
+  if (status === 'success') {
+    return (
+      <div className="max-w-3xl mx-auto py-8 flex items-center justify-center min-h-[60vh]">
+        <div className="text-center bg-white rounded-2xl shadow-lg border border-gray-100 p-12">
+          <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6">
+            <CheckCircle className="w-12 h-12 text-green-500" />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Registration Successful!</h2>
+          <p className="text-gray-500 mb-2">
+            Welcome, <span className="font-semibold text-primary">{formData.name}</span>! You're now registered as a donor.
+          </p>
+          <p className="text-sm text-gray-400">Redirecting you back…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl mx-auto py-8">
@@ -61,13 +106,24 @@ export default function DonorRegistrationPage() {
         </div>
 
         <div className="p-8">
+          {/* Health warning */}
           {showWarning && (
-            <div className="mb-8 p-4 bg-orange-50 border-l-4 border-orange-500 rounded-r text-orange-800 flex items-start gap-4 shadow-sm animate-pulse-slow">
+            <div className="mb-8 p-4 bg-orange-50 border-l-4 border-orange-500 rounded-r text-orange-800 flex items-start gap-4 shadow-sm">
               <AlertTriangle className="w-6 h-6 text-orange-500 shrink-0 mt-0.5" />
               <div>
                 <h3 className="font-bold">⚠️ Warning</h3>
-                <p className="text-sm mt-1">You may not be eligible to donate based on current health criteria (Age must be 18+ and Weight 50kg+).</p>
+                <p className="text-sm mt-1">
+                  You may not be eligible to donate based on current health criteria (Age must be 18+ and Weight 50kg+).
+                </p>
               </div>
+            </div>
+          )}
+
+          {/* API error */}
+          {apiError && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3 text-red-700 text-sm">
+              <XCircle className="w-5 h-5 shrink-0 mt-0.5" />
+              <p>{apiError}</p>
             </div>
           )}
 
@@ -111,7 +167,7 @@ export default function DonorRegistrationPage() {
                   value={formData.phone}
                   onChange={handleChange}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none"
-                  placeholder="+1 (555) 000-0000"
+                  placeholder="+91 9876543210"
                 />
               </div>
 
@@ -190,10 +246,20 @@ export default function DonorRegistrationPage() {
             <div className="pt-4 flex justify-end">
               <button
                 type="submit"
-                className="flex items-center gap-2 px-8 py-3 bg-primary text-white font-medium rounded-lg hover:bg-primary-light transition-colors shadow-md focus:ring-2 focus:ring-offset-2 focus:ring-primary"
+                disabled={status === 'loading'}
+                className="flex items-center gap-2 px-8 py-3 bg-primary text-white font-medium rounded-lg hover:bg-primary-light transition-colors shadow-md focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <Save className="w-5 h-5" />
-                Submit Registration
+                {status === 'loading' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Registering…
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-5 h-5" />
+                    Submit Registration
+                  </>
+                )}
               </button>
             </div>
           </form>

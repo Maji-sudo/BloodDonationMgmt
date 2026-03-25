@@ -1,47 +1,62 @@
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from database import connect_to_mongo, close_mongo_connection, db_instance
+
+from routes.donors import router as donors_router
+from routes.recipients import router as recipients_router
+from routes.blood import router as blood_router
+from routes.auth import router as auth_router
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Connect to DB
+    await connect_to_mongo()
+    # Backward compatibility: Still attach to app for routes relying on request.app.mongodb
+    app.mongodb_client = db_instance.client
+    app.mongodb = db_instance.db
+    yield
+    # Shutdown: Close connection
+    await close_mongo_connection()
 
 app = FastAPI(
     title="Smart Blood Bank API",
     description="Backend services for blood donation management",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Setup CORS to allow requests from your React Frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"], # Default Vite ports
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],  # Default Vite ports
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Database Setup (Motor for Async MongoDB)
-MONGO_URI="mongodb+srv://majinmandramoorthy2007_db_user:NKgHuUH9MdHvly4A@aetherblood.mne7vso.mongodb.net/?appName=AetherBlood"
-client = AsyncIOMotorClient(MONGO_URI)
-db = client.bloodbank
 
-@app.on_event("startup")
-async def startup_db_client():
-    app.mongodb_client = client
-    app.mongodb = db
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    app.mongodb_client.close()
+
+# ── Register Routers ──────────────────────────
+app.include_router(donors_router)
+app.include_router(recipients_router)
+app.include_router(blood_router)
+app.include_router(auth_router)
+
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Smart Blood Bank API"}
 
+
 @app.get("/api/health")
 async def health_check():
-    # Simple ping to verify DB connection
     try:
-        await db.command("ping")
+        await db_instance.db.command("ping")
         db_status = "connected"
     except Exception as e:
-        db_status = "disconnected"
+        db_status = f"disconnected: {str(e)}"
     return {"status": "ok", "db_connection": db_status}

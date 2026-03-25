@@ -1,41 +1,38 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Lock, LogIn, UserPlus, AlertCircle } from 'lucide-react';
+import { Mail, Lock, LogIn, UserPlus, AlertCircle, User, Loader2 } from 'lucide-react';
+import { authApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { login } = useAuth();
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
 
-    const usersStr = localStorage.getItem('bloodBankUsers');
-    const users = usersStr ? JSON.parse(usersStr) : [];
-
-    if (isLogin) {
-      const userExists = users.find(u => u.email === email);
-      if (!userExists) {
-        setError('User not registered yet.');
+    try {
+      let data;
+      if (isLogin) {
+        data = await authApi.login({ email, password });
       } else {
-        // Mock successful login
-        localStorage.setItem('currentUser', JSON.stringify({ email }));
-        navigate('/role');
+        data = await authApi.signup({ email, password, full_name: fullName });
       }
-    } else {
-      // Mock signup
-      const userExists = users.find(u => u.email === email);
-      if (userExists) {
-        setError('User already exists.');
-      } else {
-        users.push({ email, password });
-        localStorage.setItem('bloodBankUsers', JSON.stringify(users));
-        localStorage.setItem('currentUser', JSON.stringify({ email }));
-        navigate('/role');
-      }
+      
+      login(data);
+      navigate('/role');
+    } catch (err) {
+      setError(err.message || 'An error occurred during authentication');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -52,13 +49,32 @@ export default function AuthPage() {
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-primary text-primary rounded-lg flex items-center gap-3 text-sm">
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg flex items-center gap-3 text-sm">
             <AlertCircle className="w-5 h-5 shrink-0" />
             <p>{error}</p>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-5">
+          {!isLogin && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <User className="h-5 w-5 text-gray-400" />
+                </div>
+                <input
+                  type="text"
+                  required
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition-colors"
+                  placeholder="John Doe"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
             <div className="relative">
@@ -95,9 +111,12 @@ export default function AuthPage() {
 
           <button
             type="submit"
-            className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-primary hover:bg-primary-light focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary transition-colors"
+            disabled={loading}
+            className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-primary hover:bg-primary-light focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary transition-colors disabled:opacity-50"
           >
-            {isLogin ? (
+            {loading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : isLogin ? (
               <>
                 <LogIn className="w-5 h-5 mr-2" />
                 Sign In

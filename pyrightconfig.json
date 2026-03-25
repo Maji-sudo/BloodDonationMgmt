@@ -1,4 +1,5 @@
 {
-  "venvPath": "./backend",
-  "venv": "venv"
+  "venvPath": "./Backend",
+  "venv": "venv",
+  "extraPaths": ["./Backend", "./Backend/routes"]
 }

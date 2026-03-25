@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, status, Request
+from fastapi import APIRouter, HTTPException, status, Request, Depends
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List
 from datetime import datetime, date
 from bson import ObjectId
+from routes.auth import get_current_user
 
 router = APIRouter(prefix="/api/donors", tags=["Donors"])
 
@@ -97,6 +98,15 @@ async def register_donor(donor: DonorCreate, request: Request):
     # Convert date to string for MongoDB storage
     if donor_dict.get("last_donation_date"):
         donor_dict["last_donation_date"] = str(donor_dict["last_donation_date"])
+
+    # ── Update user role to donor ──
+    try:
+        await db.users.update_one(
+            {"email": donor_dict["email"].lower()},
+            {"$set": {"role": "donor"}}
+        )
+    except Exception as e:
+        print(f"⚠️ ROLE UPDATE ERROR: {str(e)}")
 
     result = await db.donors.insert_one(donor_dict)
     created = await db.donors.find_one({"_id": result.inserted_id})
@@ -197,8 +207,55 @@ async def delete_donor(donor_id: str, request: Request):
     return {"message": "Donor deleted successfully."}
 
 
+@router.get("/matches", response_model=List[dict])
+async def get_donor_matches(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get blood requests matching the authenticated donor's blood type and location.
+    Formal security check: Uses identity from JWT.
+    """
+    db = request.app.mongodb
+    from utils import calculate_distance
+    from routes.recipients import request_serializer
+
+    # 1. Fetch donor profile linked to this user
+    donor = await db.donors.find_one({"email": current_user["email"].lower()})
+    if not donor:
+        # If user is logged in but hasn't registered as a donor, return empty
+        return []
+
+    # 2. Find requests matching blood type (or Any) and not fulfilled
+    requests_query = {
+        "blood_type": {"$in": [donor["blood_type"], "Any"]},
+        "is_fulfilled": False
+    }
+    
+    matches = []
+    async for req in db.blood_requests.find(requests_query):
+        dist = calculate_distance(
+            donor.get("lat", 0), donor.get("lng", 0),
+            req.get("lat", 0), req.get("lng", 0)
+        )
+        # Enforce 10km proximity for donor matching
+        if dist <= 10:
+            req_data = request_serializer(req, viewer_email=donor["email"])
+            req_data["distance_km"] = round(dist, 2)
+            matches.append(req_data)
+
+    # Sort: nearest first
+    matches.sort(key=lambda x: x["distance_km"])
+    return matches
+
+
 @router.get("/{donor_id}/requests")
-async def get_recommended_requests_for_donor(donor_id: str, request: Request, limit: int = 10):
+async def get_recommended_requests_for_donor(
+    donor_id: str, 
+    request: Request, 
+    limit: int = 10,
+    current_user: dict = Depends(get_current_user)
+):
     """
     Get blood requests that match the donor's blood type and are nearby.
     """

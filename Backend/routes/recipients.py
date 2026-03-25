@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, status, Request
+from fastapi import APIRouter, HTTPException, status, Request, Depends
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List, Literal
 from datetime import datetime
 from bson import ObjectId
+from routes.auth import get_current_user
 
 router = APIRouter(prefix="/api/recipients", tags=["Recipients"])
 
@@ -74,13 +75,28 @@ def request_serializer(req: dict, viewer_email: Optional[str] = None) -> dict:
 # ──────────────────────────────────────────────
 
 @router.post("/request", status_code=status.HTTP_201_CREATED)
-async def create_blood_request(request_data: BloodRequestCreate, request: Request):
+async def create_blood_request(
+    request_data: BloodRequestCreate, 
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """Submit a new blood request. Urgency: 1=Low, 2=Medium, 3=Critical."""
     db = request.app.mongodb
 
     req_dict = request_data.model_dump()
     req_dict["is_fulfilled"] = False
     req_dict["requested_at"] = datetime.utcnow()
+    req_dict["created_by"] = str(current_user["_id"]) # Formal ownership link
+    req_dict["email"] = current_user["email"] # Ensure consistency
+
+    # ── Update user role if not already recipient ──
+    try:
+        await db.users.update_one(
+            {"_id": current_user["_id"]},
+            {"$set": {"role": "recipient"}}
+        )
+    except Exception as e:
+        print(f"⚠️ ROLE UPDATE ERROR: {str(e)}")
 
     result = await db.blood_requests.insert_one(req_dict)
     
@@ -122,72 +138,34 @@ async def get_all_requests(
     urgency: Optional[int] = None,
     fulfilled: Optional[bool] = None,
     blood_type: Optional[str] = None,
-    email: Optional[str] = None,
-    viewer_email: Optional[str] = None, # Used for privacy check
+    current_user: dict = Depends(get_current_user)
 ):
     """
-    Get all blood requests. Optional filters:
-    - ?urgency=3          → only critical requests
-    - ?fulfilled=false    → only open requests
-    - ?blood_type=O%2B    → only requests for O+
+    Get all blood requests (STRICT OWNERSHIP RESTORED).
+    Only the requests CREATED BY this specific user ID will be returned.
     """
     db = request.app.mongodb
-    query = {}
+    
+    # Enforce absolute privacy: Filter by the authenticated user's ID or email
+    query = {
+        "$or": [
+            {"created_by": str(current_user["_id"])},
+            {"email": current_user["email"].lower()}
+        ]
+    }
 
     if urgency is not None:
-        if urgency not in (1, 2, 3):
-            raise HTTPException(status_code=400, detail="urgency must be 1, 2, or 3")
         query["urgency"] = urgency
-
     if fulfilled is not None:
         query["is_fulfilled"] = fulfilled
-
     if blood_type:
         query["blood_type"] = blood_type
 
-    if email:
-        query["email"] = email.lower()
-
-    # ── Visibility Enforcement ──────────────────
-    if not viewer_email:
-        return [] # No feed for unauthenticated users
-
-    user = await db.users.find_one({"email": viewer_email.lower()})
-    if not user:
-        return []
-
-    # 1. If user is a recipient, they only see their OWN requests
-    if user.get("role") == "recipient":
-        query["email"] = viewer_email.lower()
-        results = []
-        async for req in db.blood_requests.find(query).sort("requested_at", -1):
-            results.append(request_serializer(req, viewer_email=viewer_email))
-        return results
-
-    # 2. If user is a donor, they only see requests within 10km
-    if user.get("role") == "donor":
-        donor = await db.donors.find_one({"email": viewer_email.lower()})
-        if not donor:
-            return []
-            
-        from utils import calculate_distance
-        results = []
-        # Find all open requests matching blood type
-        async for req in db.blood_requests.find({
-            "blood_type": {"$in": [donor["blood_type"], "Any"]},
-            "is_fulfilled": False
-        }).sort([("urgency", -1), ("requested_at", 1)]):
-            dist = calculate_distance(
-                donor.get("lat", 0), donor.get("lng", 0),
-                req.get("lat", 0), req.get("lng", 0)
-            )
-            if dist <= 10:
-                req_data = request_serializer(req, viewer_email=viewer_email)
-                req_data["distance_km"] = round(dist, 2)
-                results.append(req_data)
-        return results
-
-    return []
+    results = []
+    async for req in db.blood_requests.find(query).sort("requested_at", -1):
+        results.append(request_serializer(req, viewer_email=current_user["email"]))
+    
+    return results
 
 
 @router.get("/critical")
@@ -222,7 +200,12 @@ async def get_request_by_id(request_id: str, request: Request):
 
 
 @router.patch("/{request_id}")
-async def update_blood_request(request_id: str, updates: BloodRequestUpdate, request: Request):
+async def update_blood_request(
+    request_id: str, 
+    updates: BloodRequestUpdate, 
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """Update a blood request — change urgency, units, or mark as fulfilled."""
     db = request.app.mongodb
 
@@ -234,8 +217,9 @@ async def update_blood_request(request_id: str, updates: BloodRequestUpdate, req
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields provided to update.")
 
+    # Formal Ownership Enforcement: Only update if created_by matches current user
     result = await db.blood_requests.update_one(
-        {"_id": ObjectId(request_id)},
+        {"_id": ObjectId(request_id), "created_by": str(current_user["_id"])},
         {"$set": update_data}
     )
 
@@ -250,7 +234,11 @@ async def update_blood_request(request_id: str, updates: BloodRequestUpdate, req
 
 
 @router.patch("/{request_id}/fulfill")
-async def fulfill_request(request_id: str, request: Request):
+async def fulfill_request(
+    request_id: str, 
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """Mark a blood request as fulfilled (blood has been donated)."""
     db = request.app.mongodb
 
@@ -258,7 +246,7 @@ async def fulfill_request(request_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid request ID format.")
 
     result = await db.blood_requests.update_one(
-        {"_id": ObjectId(request_id)},
+        {"_id": ObjectId(request_id), "created_by": str(current_user["_id"])},
         {"$set": {"is_fulfilled": True, "fulfilled_at": datetime.utcnow()}}
     )
 
@@ -269,14 +257,21 @@ async def fulfill_request(request_id: str, request: Request):
 
 
 @router.delete("/{request_id}", status_code=status.HTTP_200_OK)
-async def delete_request(request_id: str, request: Request):
+async def delete_request(
+    request_id: str, 
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """Delete a blood request."""
     db = request.app.mongodb
 
     if not ObjectId.is_valid(request_id):
         raise HTTPException(status_code=400, detail="Invalid request ID format.")
 
-    result = await db.blood_requests.delete_one({"_id": ObjectId(request_id)})
+    result = await db.blood_requests.delete_one({
+        "_id": ObjectId(request_id), 
+        "created_by": str(current_user["_id"])
+    })
 
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Blood request not found.")
@@ -285,7 +280,11 @@ async def delete_request(request_id: str, request: Request):
 
 
 @router.post("/{request_id}/auto-allocate")
-async def auto_allocate_donors(request_id: str, request: Request):
+async def auto_allocate_donors(
+    request_id: str, 
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """
     Core Logic: 
     1. Find eliigible donors (blood type, distance, cooldown).
@@ -305,6 +304,11 @@ async def auto_allocate_donors(request_id: str, request: Request):
     blood_req = await db.blood_requests.find_one({"_id": ObjectId(request_id)})
     if not blood_req or blood_req.get("is_fulfilled"):
         raise HTTPException(status_code=404, detail="Open blood request not found.")
+
+    # 🔒 Ownership Check: Only the requester can auto-allocate donors
+    # Compare with both email AND internal ID if possible
+    if str(blood_req.get("created_by")) != str(current_user["_id"]) and blood_req.get("email") != current_user["email"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the original requester can trigger auto-allocation.")
 
     units_needed = blood_req.get("units_needed", 0)
     blood_type = blood_req.get("blood_type")
@@ -378,10 +382,16 @@ async def auto_allocate_donors(request_id: str, request: Request):
     }
 
 @router.get("/{request_id}/matches")
-async def match_best_donors(request_id: str, request: Request, limit: int = 5):
+async def match_best_donors(
+    request_id: str, 
+    request: Request, 
+    limit: int = 5,
+    current_user: dict = Depends(get_current_user)
+):
     """
     Find best donors for a request WITHOUT allocating them.
     Used for previewing matches in the UI.
+    🔒 Protected: User ID must match created_by or email.
     """
     db = request.app.mongodb
     from utils import calculate_distance, is_donation_eligible
@@ -393,6 +403,10 @@ async def match_best_donors(request_id: str, request: Request, limit: int = 5):
     blood_req = await db.blood_requests.find_one({"_id": ObjectId(request_id)})
     if not blood_req:
         raise HTTPException(status_code=404, detail="Blood request not found.")
+
+    # 🔒 Ownership Check
+    if str(blood_req.get("created_by")) != str(current_user["_id"]) and blood_req.get("email") != current_user["email"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied. You do not own this request.")
 
     donors_query = {"blood_type": blood_req["blood_type"], "is_available": True}
     

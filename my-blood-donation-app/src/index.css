@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #B22222;
+  --color-primary-light: #D32F2F;
+  --color-primary-dark: #8B0000;
+  --color-background: #F9FAFB;
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-pulse-fast: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@layer base {
+  body {
+    /* Set the default professional layout styles */
+    background-color: var(--color-background);
+    color: var(--color-gray-900);
+    margin: 0;
+    padding: 0;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+}

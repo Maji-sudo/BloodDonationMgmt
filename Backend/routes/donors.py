@@ -21,6 +21,8 @@ class DonorCreate(BaseModel):
     last_donation_date: Optional[date] = None
     medical_conditions: Optional[str] = None
     address: Optional[str] = None
+    lat: float = Field(0.0, description="Latitude for matching")
+    lng: float = Field(0.0, description="Longitude for matching")
     is_available: bool = True
 
 
@@ -43,6 +45,8 @@ class DonorResponse(BaseModel):
     last_donation_date: Optional[str]
     medical_conditions: Optional[str]
     address: Optional[str]
+    lat: float
+    lng: float
     is_available: bool
     registered_at: str
 
@@ -63,6 +67,8 @@ def donor_serializer(donor: dict) -> dict:
         "last_donation_date": str(donor["last_donation_date"]) if donor.get("last_donation_date") else None,
         "medical_conditions": donor.get("medical_conditions"),
         "address": donor.get("address"),
+        "lat": donor.get("lat", 0.0),
+        "lng": donor.get("lng", 0.0),
         "is_available": donor.get("is_available", True),
         "registered_at": str(donor.get("registered_at", "")),
     }
@@ -189,3 +195,102 @@ async def delete_donor(donor_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Donor not found.")
 
     return {"message": "Donor deleted successfully."}
+
+
+@router.get("/{donor_id}/requests")
+async def get_recommended_requests_for_donor(donor_id: str, request: Request, limit: int = 10):
+    """
+    Get blood requests that match the donor's blood type and are nearby.
+    """
+    db = request.app.mongodb
+    from utils import calculate_distance
+    from routes.recipients import request_serializer
+
+    if not ObjectId.is_valid(donor_id):
+        raise HTTPException(status_code=400, detail="Invalid donor ID format.")
+
+    donor = await db.donors.find_one({"_id": ObjectId(donor_id)})
+    if not donor:
+        raise HTTPException(status_code=404, detail="Donor not found.")
+
+    # Find requests matching blood type (or Any) and not fulfilled
+    requests_query = {
+        "blood_type": {"$in": [donor["blood_type"], "Any"]},
+        "is_fulfilled": False
+    }
+    
+    nearby_requests = []
+    async for req in db.blood_requests.find(requests_query):
+        dist = calculate_distance(
+            donor.get("lat", 0), donor.get("lng", 0),
+            req.get("lat", 0), req.get("lng", 0)
+        )
+        # Filter by 10km radius
+        if dist <= 10:
+            req_data = request_serializer(req, viewer_email=donor["email"])
+            req_data["distance_km"] = round(dist, 2)
+            nearby_requests.append(req_data)
+
+    # Sort: nearest first
+    nearby_requests.sort(key=lambda x: x["distance_km"])
+    return nearby_requests[:limit]
+
+
+@router.post("/{donor_id}/accept/{blood_request_id}")
+async def accept_blood_request(donor_id: str, blood_request_id: str, request: Request, screening_passed: bool = True):
+    """
+    Process a donor's decision to fulfill a specific blood request.
+    Requires health screening verification.
+    """
+    db = request.app.mongodb
+    if not screening_passed:
+        raise HTTPException(status_code=400, detail="Health screening is mandatory before acceptance.")
+
+    if not ObjectId.is_valid(donor_id) or not ObjectId.is_valid(blood_request_id):
+         raise HTTPException(status_code=400, detail="Invalid ID format.")
+    
+    donor = await db.donors.find_one({"_id": ObjectId(donor_id)})
+    blood_req = await db.blood_requests.find_one({"_id": ObjectId(blood_request_id)})
+    
+    if not donor or not blood_req:
+        raise HTTPException(status_code=404, detail="Donor or Request not found.")
+        
+    # Check if already accepted
+    existing = await db.blood_requests.find_one({
+        "_id": ObjectId(blood_request_id),
+        "matches.donor_id": donor_id
+    })
+    if existing:
+        return {"message": "You have already accepted this request."}
+        
+    # Add donor to the request's matches (Accepted Donors)
+    await db.blood_requests.update_one(
+        {"_id": ObjectId(blood_request_id)},
+        {"$push": {
+            "matches": {
+                "donor_id": donor_id,
+                "email": donor["email"], # Storing email for privacy serializer lookup
+                "name": donor["name"],
+                "phone": donor["phone"],
+                "blood_type": donor["blood_type"],
+                "accepted_at": datetime.utcnow(),
+                "screening_status": "Passed"
+            }
+        }}
+    )
+    
+    # 3. Notify Recipient
+    try:
+        from routes.notifications import send_notification
+        await send_notification(
+            db, 
+            blood_req["email"], 
+            title="❤️ Lifesaver Found!", 
+            message=f"{donor['name']} has accepted your request for {blood_req['blood_type']} blood.",
+            n_type="success",
+            metadata={"donor_id": donor_id, "request_id": blood_request_id}
+        )
+    except Exception as e:
+        print(f"⚠️ NOTIFICATION ERROR: {str(e)}")
+    
+    return {"message": "Thank you for accepting! Your details are now visible to the recipient."}

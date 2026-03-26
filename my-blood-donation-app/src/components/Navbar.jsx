@@ -1,18 +1,56 @@
-import { Droplet, LogOut, User, LayoutDashboard, ListFilter, Home } from 'lucide-react';
+import { Droplet, LogOut, User, LayoutDashboard, ListFilter, Home, Bell } from 'lucide-react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useState, useEffect } from 'react';
+import { notificationApi } from '../services/api';
 
 export default function Navbar() {
   const { user, logout, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
+  const [notifications, setNotifications] = useState([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated && user?.email) {
+      fetchNotifications();
+      const interval = setInterval(fetchNotifications, 10000); // Check every 10s
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated, user]);
+
+  const fetchNotifications = async () => {
+    try {
+      const data = await notificationApi.getAll(user.email);
+      setNotifications(data);
+    } catch(err) {
+      console.error(err);
+    }
+  };
+
   const handleLogout = () => {
     logout();
     navigate('/');
   };
 
+  const markAsRead = async (id) => {
+    try {
+      await notificationApi.markAsRead(id);
+      fetchNotifications();
+    } catch(err) {}
+  };
+
+  const markAllAsRead = async () => {
+    try {
+      await notificationApi.markAllAsRead(user.email);
+      fetchNotifications();
+    } catch(err) {}
+  };
+
   const isActive = (path) => location.pathname === path;
+
+  const unreadCount = notifications.filter(n => !n.is_read).length;
 
   return (
     <nav className="bg-primary text-white shadow-md sticky top-0 z-50">
@@ -47,6 +85,55 @@ export default function Navbar() {
         <div className="flex items-center gap-4">
           {isAuthenticated ? (
             <div className="flex items-center gap-4">
+              
+              {/* Notifications Dropdown */}
+              <div className="relative">
+                <button 
+                  onClick={() => setShowDropdown(!showDropdown)}
+                  className="relative p-2 rounded-full hover:bg-white/10 transition-colors"
+                >
+                  <Bell className="w-5 h-5" />
+                  {unreadCount > 0 && (
+                    <span className="absolute top-1 right-1.5 w-2 h-2 bg-red-500 rounded-full animate-pulse border border-white"></span>
+                  )}
+                </button>
+
+                {showDropdown && (
+                  <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-2xl border border-gray-100 overflow-hidden text-gray-800 z-50">
+                    <div className="flex justify-between items-center p-3 border-b border-gray-50 bg-gray-50/50">
+                      <h3 className="font-bold text-sm">Notifications</h3>
+                      {unreadCount > 0 && (
+                        <button onClick={markAllAsRead} className="text-xs text-primary hover:underline">
+                          Mark all read
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-80 overflow-y-auto">
+                      {notifications.length === 0 ? (
+                        <div className="p-4 text-center text-sm text-gray-500">No notifications</div>
+                      ) : (
+                        notifications.map((n) => (
+                          <div 
+                            key={n.id} 
+                            onClick={() => markAsRead(n.id)}
+                            className={`p-3 border-b border-gray-50 text-sm cursor-pointer hover:bg-gray-50 transition-colors ${!n.is_read ? 'bg-blue-50/30' : ''}`}
+                          >
+                            <div className="flex justify-between items-start gap-2 mb-1">
+                              <span className={`font-semibold ${n.type === 'warning' ? 'text-orange-600' : 'text-gray-900'}`}>{n.title}</span>
+                              {!n.is_read && <span className="w-2 h-2 bg-primary rounded-full mt-1.5 shrink-0"></span>}
+                            </div>
+                            <p className="text-gray-600 text-xs">{n.message}</p>
+                            <span className="text-[10px] text-gray-400 mt-2 block">
+                              {new Date(n.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="hidden sm:flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-full text-xs font-semibold border border-white/20">
                 <User className="w-3.5 h-3.5" />
                 <span>{user.user_name || user.email}</span>

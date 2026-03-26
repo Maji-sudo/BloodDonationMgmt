@@ -302,35 +302,52 @@ async def auto_allocate_donors(
 
     # 1. Get the request
     blood_req = await db.blood_requests.find_one({"_id": ObjectId(request_id)})
-    if not blood_req or blood_req.get("is_fulfilled"):
-        raise HTTPException(status_code=404, detail="Open blood request not found.")
+    if not blood_req:
+        raise HTTPException(status_code=404, detail="Blood request not found.")
+    if blood_req.get("is_fulfilled"):
+        raise HTTPException(status_code=400, detail="This request has already been fulfilled.")
 
-    # 🔒 Ownership Check: Only the requester can auto-allocate donors
-    # Compare with both email AND internal ID if possible
-    if str(blood_req.get("created_by")) != str(current_user["_id"]) and blood_req.get("email") != current_user["email"]:
+    # Ownership Check: match by email (most reliable) OR by created_by string
+    user_email = current_user.get("email", "").lower()
+    req_email = blood_req.get("email", "").lower()
+    created_by = str(blood_req.get("created_by", ""))
+    user_id = str(current_user.get("_id", ""))
+    if req_email != user_email and created_by != user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the original requester can trigger auto-allocation.")
 
     units_needed = blood_req.get("units_needed", 0)
-    blood_type = blood_req.get("blood_type")
-    
-    # 2. Get potential donors
-    potential_donors = []
-    donors_query = {"blood_type": blood_type, "is_available": True}
-    
-    async for d in db.donors.find(donors_query):
-        if is_donation_eligible(d.get("last_donation_date")):
-            dist = calculate_distance(
-                blood_req.get("lat", 0), blood_req.get("lng", 0),
-                d.get("lat", 0), d.get("lng", 0)
-            )
-            potential_donors.append({
-                "id": str(d["_id"]),
-                "name": d.get("name"),
-                "phone": d.get("phone"),
-                "distance": dist
-            })
+    blood_type = blood_req.get("blood_type", "")
 
-    # 3. Sort by distance (minimum distance first)
+    # Blood type compatibility
+    COMPATIBLE_DONORS = {
+        "A+":  ["A+", "A-", "O+", "O-"],
+        "A-":  ["A-", "O-"],
+        "B+":  ["B+", "B-", "O+", "O-"],
+        "B-":  ["B-", "O-"],
+        "AB+": ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"],
+        "AB-": ["A-", "B-", "AB-", "O-"],
+        "O+":  ["O+", "O-"],
+        "O-":  ["O-"],
+    }
+    compatible_types = COMPATIBLE_DONORS.get(blood_type, [blood_type])
+
+    # 2. Get potential donors (compatible blood type, available)
+    potential_donors = []
+    donors_query = {"blood_type": {"$in": compatible_types}, "is_available": True}
+
+    async for d in db.donors.find(donors_query):
+        dist = calculate_distance(
+            blood_req.get("lat", 0), blood_req.get("lng", 0),
+            d.get("lat", 0), d.get("lng", 0)
+        )
+        potential_donors.append({
+            "id": str(d["_id"]),
+            "name": d.get("name"),
+            "phone": d.get("phone"),
+            "distance": dist
+        })
+
+    # 3. Sort by distance (nearest first)
     potential_donors.sort(key=lambda x: x["distance"])
 
     # 4. Allocate
@@ -341,11 +358,9 @@ async def auto_allocate_donors(
         if units_needed <= 0:
             break
             
-        # Allocate this donor
         allocated_count += 1
         units_needed -= 1
         
-        # Mark donor as unavailable and set last donation date
         await db.donors.update_one(
             {"_id": ObjectId(donor["id"])},
             {"$set": {
@@ -385,16 +400,12 @@ async def auto_allocate_donors(
 async def match_best_donors(
     request_id: str, 
     request: Request, 
-    limit: int = 5,
+    limit: int = 10,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Find best donors for a request WITHOUT allocating them.
-    Used for previewing matches in the UI.
-    🔒 Protected: User ID must match created_by or email.
-    """
+    """Find best donors for a request - compatible blood types, sorted by distance."""
     db = request.app.mongodb
-    from utils import calculate_distance, is_donation_eligible
+    from utils import calculate_distance
     from routes.donors import donor_serializer
 
     if not ObjectId.is_valid(request_id):
@@ -404,22 +415,36 @@ async def match_best_donors(
     if not blood_req:
         raise HTTPException(status_code=404, detail="Blood request not found.")
 
-    # 🔒 Ownership Check
+    # Ownership check
     if str(blood_req.get("created_by")) != str(current_user["_id"]) and blood_req.get("email") != current_user["email"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied. You do not own this request.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
-    donors_query = {"blood_type": blood_req["blood_type"], "is_available": True}
-    
+    req_blood_type = blood_req.get("blood_type", "")
+
+    # Blood compatibility: which donor types can donate to this recipient type
+    COMPATIBLE_DONORS = {
+        "A+":  ["A+", "A-", "O+", "O-"],
+        "A-":  ["A-", "O-"],
+        "B+":  ["B+", "B-", "O+", "O-"],
+        "B-":  ["B-", "O-"],
+        "AB+": ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"],
+        "AB-": ["A-", "B-", "AB-", "O-"],
+        "O+":  ["O+", "O-"],
+        "O-":  ["O-"],
+    }
+    compatible_types = COMPATIBLE_DONORS.get(req_blood_type, [req_blood_type])
+
+    donors_query = {"blood_type": {"$in": compatible_types}, "is_available": True}
+
     potential_donors = []
     async for d in db.donors.find(donors_query):
-        if is_donation_eligible(d.get("last_donation_date")):
-            dist = calculate_distance(
-                blood_req.get("lat", 0), blood_req.get("lng", 0),
-                d.get("lat", 0), d.get("lng", 0)
-            )
-            donor_data = donor_serializer(d)
-            donor_data["distance_km"] = round(dist, 2)
-            potential_donors.append(donor_data)
+        dist = calculate_distance(
+            blood_req.get("lat", 0), blood_req.get("lng", 0),
+            d.get("lat", 0), d.get("lng", 0)
+        )
+        donor_data = donor_serializer(d)
+        donor_data["distance_km"] = round(dist, 2)
+        potential_donors.append(donor_data)
 
     potential_donors.sort(key=lambda x: x["distance_km"])
     return {
@@ -427,4 +452,53 @@ async def match_best_donors(
         "matches_count": len(potential_donors),
         "matches": potential_donors[:limit]
     }
+
+
+@router.post("/{request_id}/notify_donor/{donor_id}")
+async def notify_single_donor(
+    request_id: str,
+    donor_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Recipient manually selects/notifies a specific donor.
+    """
+    db = request.app.mongodb
+    from utils import calculate_distance
+    from routes.notifications import send_notification
+
+    if not ObjectId.is_valid(request_id) or not ObjectId.is_valid(donor_id):
+        raise HTTPException(status_code=400, detail="Invalid ID format.")
+
+    blood_req = await db.blood_requests.find_one({"_id": ObjectId(request_id)})
+    if not blood_req:
+        raise HTTPException(status_code=404, detail="Blood request not found.")
+
+    # Ownership Check
+    if str(blood_req.get("created_by")) != str(current_user["_id"]) and blood_req.get("email") != current_user["email"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied. You do not own this request.")
+
+    donor = await db.donors.find_one({"_id": ObjectId(donor_id)})
+    if not donor:
+        raise HTTPException(status_code=404, detail="Donor not found.")
+
+    dist = calculate_distance(
+        blood_req.get("lat", 0), blood_req.get("lng", 0),
+        donor.get("lat", 0), donor.get("lng", 0)
+    )
+
+    try:
+        await send_notification(
+            db, donor["email"], 
+            title="❤️ You have been selected!",
+            message=f"A recipient explicitly requested your blood. the request near {round(dist, 1)}km",
+            n_type="warning",
+            metadata={"request_id": request_id, "distance_km": round(dist, 1)}
+        )
+    except Exception as e:
+        print(f"⚠️ NOTIFICATION ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to send notification.")
+
+    return {"message": f"Donor {donor['name']} has been notified."}
 

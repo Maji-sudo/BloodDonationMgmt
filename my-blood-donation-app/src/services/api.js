@@ -99,6 +99,12 @@ export const recipientApi = {
 
   delete: (id) =>
     request(`/api/recipients/${id}`, { method: 'DELETE' }),
+
+  getMatches: (id) => 
+    request(`/api/recipients/${id}/matches`),
+
+  notifyDonor: (requestId, donorId) =>
+    request(`/api/recipients/${requestId}/notify_donor/${donorId}`, { method: 'POST' }),
 };
 
 // ── Blood Inventory ───────────────────────────
@@ -132,4 +138,11 @@ export const bloodApi = {
       method: 'PATCH',
       body: JSON.stringify({ units, reason }),
     }),
+};
+
+// ── Notifications ─────────────────────────────
+export const notificationApi = {
+  getAll: (email) => request(`/api/notifications/${encodeURIComponent(email)}`),
+  markAsRead: (id) => request(`/api/notifications/read/${id}`, { method: 'POST' }),
+  markAllAsRead: (email) => request(`/api/notifications/read-all/${encodeURIComponent(email)}`, { method: 'POST' })
 };
